@@ -1,12 +1,9 @@
 from .models import StripeModel, BillingAddress, OrderModel
 from django.http import Http404
-from rest_framework import status
-from rest_framework.views import APIView
+from rest_framework import status, viewsets, permissions
 from django.contrib.auth.models import User
 from rest_framework.response import Response
 from django.contrib.auth.hashers import make_password
-from rest_framework import authentication, permissions
-from rest_framework.decorators import permission_classes
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
 from rest_framework_simplejwt.views import TokenObtainPairView  # for login page
 from django.contrib.auth.hashers import check_password
@@ -19,15 +16,22 @@ from .serializers import (
     AllOrdersListSerializer,
 )
 
+from rest_framework.decorators import action
+from rest_framework.views import APIView
+
 
 # register user
 class UserRegisterView(APIView):
-    """To Register the User"""
+    """To Register the User (kept as function-style view)
+
+    Note: We're keeping registration as a separate endpoint; user CRUD is handled by
+    UserViewSet below.
+    """
 
     def post(self, request, format=None):
         data = request.data  # holds username and password (in dictionary)
-        username = data["username"]
-        email = data["email"]
+        username = data.get("username", "")
+        email = data.get("email", "")
 
         if username == "" or email == "":
             return Response(
@@ -35,24 +39,27 @@ class UserRegisterView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
-        else:
-            check_username = User.objects.filter(username=username).count()
-            check_email = User.objects.filter(email=email).count()
+        check_username = User.objects.filter(username=username).exists()
+        check_email = User.objects.filter(email=email).exists()
 
-            if check_username:
-                message = "A user with that username already exist!"
-                return Response({"detail": message}, status=status.HTTP_403_FORBIDDEN)
-            if check_email:
-                message = "A user with that email address already exist!"
-                return Response({"detail": message}, status=status.HTTP_403_FORBIDDEN)
-            else:
-                user = User.objects.create(
-                    username=username,
-                    email=email,
-                    password=make_password(data["password"]),
-                )
-                serializer = UserRegisterTokenSerializer(user, many=False)
-                return Response(serializer.data)
+        if check_username:
+            return Response(
+                {"detail": "A user with that username already exist!"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+        if check_email:
+            return Response(
+                {"detail": "A user with that email address already exist!"},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        user = User.objects.create(
+            username=username,
+            email=email,
+            password=make_password(data.get("password", "")),
+        )
+        serializer = UserRegisterTokenSerializer(user, many=False)
+        return Response(serializer.data)
 
 
 # login user (customizing it so that we can see fields like username, email etc as a response
@@ -75,256 +82,249 @@ class MyTokenObtainPairView(TokenObtainPairView):
 
 
 # list all the cards (of currently logged in user only)
-class CardsListView(APIView):
-
+class CardViewSet(viewsets.ModelViewSet):
+    serializer_class = CardsListSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request):
-        # show stripe cards of only that user which is equivalent
-        # to currently logged in user
-        stripeCards = StripeModel.objects.filter(user=request.user)
-        serializer = CardsListSerializer(stripeCards, many=True)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+    def get_queryset(self):
+        return StripeModel.objects.filter(user=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    @action(detail=True, methods=["post"])
+    def mask(self, request, pk=None):
+        """Return masked card details (last 4 digits) for a card"""
+        card = get_object_or_404(StripeModel, id=pk, user=request.user)
+        last4 = card.card_number[-4:] if card.card_number else None
+        return Response({"last4": last4})
 
 
 # get user details
-class UserAccountDetailsView(APIView):
+class UserViewSet(viewsets.ModelViewSet):
+    serializer_class = UserSerializer
+    queryset = User.objects.all()
 
-    permission_classes = [permissions.IsAuthenticated]
+    def get_permissions(self):
+        # Allow list/retrieve to authenticated users, updates only by owners or admin
+        if self.action in ["list"]:
+            permission_classes = [permissions.IsAdminUser]
+        elif self.action in ["retrieve"]:
+            permission_classes = [permissions.IsAuthenticated]
+        elif self.action in ["update", "partial_update", "destroy"]:
+            permission_classes = [permissions.IsAuthenticated]
+        else:
+            permission_classes = [permissions.AllowAny]
+        return [permission() for permission in permission_classes]
 
-    def get(self, request, pk):
-        try:
-            user = User.objects.get(id=pk)
-            serializer = UserSerializer(user, many=False)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+    def retrieve(self, request, pk=None):
+        user = get_object_or_404(User, id=pk)
+        serializer = self.get_serializer(user)
+        return Response(serializer.data)
 
-        except:
+    @action(
+        detail=False, methods=["get"], permission_classes=[permissions.IsAuthenticated]
+    )
+    def me(self, request):
+        """Get current authenticated user's data"""
+        serializer = self.get_serializer(request.user)
+        return Response(serializer.data)
+
+    @action(
+        detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated]
+    )
+    def change_password(self, request, pk=None):
+        user = get_object_or_404(User, id=pk)
+        if request.user.id != user.id and not request.user.is_staff:
             return Response(
-                {"details": "User not found"}, status=status.HTTP_404_NOT_FOUND
+                {"details": "Permission Denied."}, status=status.HTTP_403_FORBIDDEN
             )
+        data = request.data
+        old = data.get("old_password")
+        new = data.get("new_password")
+        if not old or not new:
+            return Response(
+                {"detail": "Both old_password and new_password are required."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        if not check_password(old, user.password):
+            return Response(
+                {"detail": "Old password does not match."},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+        user.password = make_password(new)
+        user.save()
+        return Response({"detail": "Password changed successfully."})
+
+    def update(self, request, pk=None):
+        user = get_object_or_404(User, id=pk)
+        if request.user.id != user.id and not request.user.is_staff:
+            return Response(
+                {"details": "Permission Denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+
+        data = request.data
+        user.username = data.get("username", user.username)
+        user.email = data.get("email", user.email)
+        if data.get("password"):
+            user.password = make_password(data["password"])
+        user.save()
+        serializer = self.get_serializer(user)
+        return Response(
+            {"details": "User Successfully Updated.", "user": serializer.data}
+        )
+
+    def destroy(self, request, pk=None):
+        user = get_object_or_404(User, id=pk)
+        data = request.data
+        if request.user.id != user.id and not request.user.is_staff:
+            return Response(
+                {"details": "Permission Denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+        if (
+            check_password(data.get("password", ""), user.password)
+            or request.user.is_staff
+        ):
+            user.delete()
+            return Response(
+                {"details": "User successfully deleted."},
+                status=status.HTTP_204_NO_CONTENT,
+            )
+        return Response(
+            {"details": "Incorrect password."}, status=status.HTTP_401_UNAUTHORIZED
+        )
 
 
 # update user account
-class UserAccountUpdateView(APIView):
-
-    permission_classes = [permissions.IsAuthenticated]
-
-    def put(self, request, pk):
-        user = User.objects.get(id=pk)
-        data = request.data
-
-        if user:
-            if request.user.id == user.id:
-                user.username = data["username"]
-                user.email = data["email"]
-
-                if data["password"] != "":
-                    user.password = make_password(data["password"])
-
-                user.save()
-                serializer = UserSerializer(user, many=False)
-                message = {
-                    "details": "User Successfully Updated.",
-                    "user": serializer.data,
-                }
-                return Response(message, status=status.HTTP_200_OK)
-            else:
-                return Response(
-                    {"details": "Permission Denied."}, status.status.HTTP_403_FORBIDDEN
-                )
-        else:
-            return Response(
-                {"details": "User not found."}, status=status.HTTP_404_NOT_FOUND
-            )
+# Note: update and delete are handled inside UserViewSet
 
 
 # delete user account
-class UserAccountDeleteView(APIView):
-
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request, pk):
-
-        try:
-            user = User.objects.get(id=pk)
-            data = request.data
-
-            if request.user.id == user.id:
-                if check_password(data["password"], user.password):
-                    user.delete()
-                    return Response(
-                        {"details": "User successfully deleted."},
-                        status=status.HTTP_204_NO_CONTENT,
-                    )
-                else:
-                    return Response(
-                        {"details": "Incorrect password."},
-                        status=status.HTTP_401_UNAUTHORIZED,
-                    )
-            else:
-                return Response(
-                    {"details": "Permission Denied."}, status=status.HTTP_403_FORBIDDEN
-                )
-        except:
-            return Response(
-                {"details": "User not found."}, status=status.HTTP_404_NOT_FOUND
-            )
+# Note: delete handled via UserViewSet.destroy
 
 
 # get billing address (details of user address, all addresses)
-class UserAddressesListView(APIView):
+class BillingAddressViewSet(viewsets.ModelViewSet):
+    serializer_class = BillingAddressSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request):
-        user = request.user
-        user_address = BillingAddress.objects.filter(user=user)
-        serializer = BillingAddressSerializer(user_address, many=True)
+    def get_queryset(self):
+        return BillingAddress.objects.filter(user=self.request.user)
 
-        return Response(serializer.data, status=status.HTTP_200_OK)
+    def perform_create(self, serializer):
+        serializer.save(user=self.request.user)
+
+    def retrieve(self, request, pk=None):
+        address = get_object_or_404(BillingAddress, id=pk)
+        if address.user != request.user and not request.user.is_staff:
+            return Response(
+                {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+        serializer = self.get_serializer(address)
+        return Response(serializer.data)
+
+    def update(self, request, pk=None):
+        address = get_object_or_404(BillingAddress, id=pk)
+        if address.user != request.user and not request.user.is_staff:
+            return Response(
+                {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+        data = request.data
+        serializer = self.get_serializer(address, data=data, partial=True)
+        if serializer.is_valid():
+            serializer.save()
+            return Response(serializer.data)
+        return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+    def destroy(self, request, pk=None):
+        address = get_object_or_404(BillingAddress, id=pk)
+        if address.user != request.user and not request.user.is_staff:
+            return Response(
+                {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+        address.delete()
+        return Response(
+            {"details": "Address successfully deleted."},
+            status=status.HTTP_204_NO_CONTENT,
+        )
+
+    @action(
+        detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated]
+    )
+    def validate(self, request, pk=None):
+        """A simple validation endpoint that simulates address validation."""
+        address = get_object_or_404(BillingAddress, id=pk)
+        if address.user != request.user and not request.user.is_staff:
+            return Response(
+                {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+        # In real implementation, we'd call an external validation API.
+        return Response({"valid": True, "message": "Address looks valid."})
 
 
 # get specific address only
-class UserAddressDetailsView(APIView):
-
-    def get(self, request, pk):
-        user_address = BillingAddress.objects.get(id=pk)
-        serializer = BillingAddressSerializer(user_address, many=False)
-        return Response(serializer.data, status=status.HTTP_200_OK)
-
-
-# create billing address
-class CreateUserAddressView(APIView):
-
-    permission_classes = [permissions.IsAuthenticated]
-
-    def post(self, request):
-        data = request.data
-
-        new_address = {
-            "name": request.data["name"],
-            "user": request.user.id,
-            "phone_number": request.data["phone_number"],
-            "pin_code": request.data["pin_code"],
-            "house_no": request.data["house_no"],
-            "landmark": request.data["landmark"],
-            "city": request.data["city"],
-            "state": request.data["state"],
-        }
-
-        serializer = BillingAddressSerializer(data=new_address, many=False)
-        if serializer.is_valid():
-            serializer.save()
-            return Response(serializer.data, status=status.HTTP_200_OK)
-        else:
-            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+# create/retrieve/update/delete handled by BillingAddressViewSet
 
 
 # edit billing address
-class UpdateUserAddressView(APIView):
-
-    permission_classes = [permissions.IsAuthenticated]
-
-    def put(self, request, pk):
-        data = request.data
-
-        try:
-            user_address = BillingAddress.objects.get(id=pk)
-
-            if request.user.id == user_address.user.id:
-
-                updated_address = {
-                    "name": data["name"] if data["name"] else user_address.name,
-                    "user": request.user.id,
-                    "phone_number": (
-                        data["phone_number"]
-                        if data["phone_number"]
-                        else user_address.phone_number
-                    ),
-                    "pin_code": (
-                        data["pin_code"] if data["pin_code"] else user_address.pin_code
-                    ),
-                    "house_no": (
-                        data["house_no"] if data["house_no"] else user_address.house_no
-                    ),
-                    "landmark": (
-                        data["landmark"] if data["landmark"] else user_address.landmark
-                    ),
-                    "city": data["city"] if data["city"] else user_address.city,
-                    "state": data["state"] if data["state"] else user_address.state,
-                }
-
-                serializer = BillingAddressSerializer(
-                    user_address, data=updated_address
-                )
-                if serializer.is_valid():
-                    serializer.save()
-                    return Response(serializer.data, status=status.HTTP_200_OK)
-                else:
-                    return Response(
-                        serializer.errors, status=status.HTTP_400_BAD_REQUEST
-                    )
-            else:
-                return Response(
-                    {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
-                )
-        except:
-            return Response({"details": "Not found."}, status=status.HTTP_404_NOT_FOUND)
-
-
-# delete address
-class DeleteUserAddressView(APIView):
-
-    def delete(self, request, pk):
-
-        try:
-            user_address = BillingAddress.objects.get(id=pk)
-
-            if request.user.id == user_address.user.id:
-                user_address.delete()
-                return Response(
-                    {"details": "Address successfully deleted."},
-                    status=status.HTTP_204_NO_CONTENT,
-                )
-            else:
-                return Response(
-                    {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
-                )
-        except:
-            return Response({"details": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+# delete handled by BillingAddressViewSet
 
 
 # all orders list
-class OrdersListView(APIView):
-
+class OrderViewSet(viewsets.ModelViewSet):
+    serializer_class = AllOrdersListSerializer
     permission_classes = [permissions.IsAuthenticated]
 
-    def get(self, request):
+    def get_queryset(self):
+        if self.request.user.is_staff:
+            return OrderModel.objects.all()
+        return OrderModel.objects.filter(user=self.request.user)
 
-        user_staff_status = request.user.is_staff
-
-        if user_staff_status:
-            all_users_orders = OrderModel.objects.all()
-            serializer = AllOrdersListSerializer(all_users_orders, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+    def get_permissions(self):
+        if self.action in ["update", "partial_update"]:
+            permission_classes = [permissions.IsAdminUser]
         else:
-            all_orders = OrderModel.objects.filter(user=request.user)
-            serializer = AllOrdersListSerializer(all_orders, many=True)
-            return Response(serializer.data, status=status.HTTP_200_OK)
+            permission_classes = [permissions.IsAuthenticated]
+        return [permission() for permission in permission_classes]
+
+    def update(self, request, pk=None):
+        # Used for changing delivered status by admin
+        order = get_object_or_404(OrderModel, id=pk)
+        if not request.user.is_staff:
+            return Response(
+                {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+        data = request.data
+        order.is_delivered = data.get("is_delivered", order.is_delivered)
+        order.delivered_at = data.get("delivered_at", order.delivered_at)
+        order.save()
+        serializer = self.get_serializer(order)
+        return Response(serializer.data)
+
+    @action(detail=True, methods=["post"], permission_classes=[permissions.IsAdminUser])
+    def mark_delivered(self, request, pk=None):
+        order = get_object_or_404(OrderModel, id=pk)
+        order.is_delivered = True
+        order.delivered_at = request.data.get("delivered_at", order.delivered_at)
+        order.save()
+        serializer = self.get_serializer(order)
+        return Response(serializer.data)
+
+    @action(
+        detail=True, methods=["post"], permission_classes=[permissions.IsAuthenticated]
+    )
+    def confirm_payment(self, request, pk=None):
+        order = get_object_or_404(OrderModel, id=pk)
+        if order.user != request.user and not request.user.is_staff:
+            return Response(
+                {"details": "Permission denied."}, status=status.HTTP_403_FORBIDDEN
+            )
+        order.paid_status = True
+        order.paid_at = request.data.get("paid_at", order.paid_at)
+        order.save()
+        serializer = self.get_serializer(order)
+        return Response(serializer.data)
 
 
 # change order delivered status
-class ChangeOrderStatus(APIView):
-
-    permission_classes = [permissions.IsAdminUser]
-
-    def put(self, request, pk):
-        data = request.data
-        order = OrderModel.objects.get(id=pk)
-
-        # only update this
-        order.is_delivered = data["is_delivered"]
-        order.delivered_at = data["delivered_at"]
-        order.save()
-
-        serializer = AllOrdersListSerializer(order, many=False)
-        return Response(serializer.data, status=status.HTTP_200_OK)
+# ChangeOrderStatus handled by OrderViewSet.update

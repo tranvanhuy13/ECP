@@ -1,4 +1,4 @@
-#!D:\python\Ecommerce-YashMarmat\FullStack_Ecommerce_App\backend\venv\Scripts\python.exe
+#!D:\python\ECP\FullStack_Ecommerce_App\backend\venv\Scripts\python.exe
 # When the django-admin.py deprecation ends, remove this script.
 import warnings
 

@@ -1,11 +1,17 @@
-from django.urls import path
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
 from product import views
 
+router = DefaultRouter()
+router.register(r'products', views.ProductViewSet, basename='product')
+router.register(r'ratings', views.RatingViewSet, basename='rating')
+router.register(r'reports', views.ReportViewSet, basename='report')
+
+# Nested routes for ratings
+product_router = DefaultRouter()
+product_router.register(r'ratings', views.RatingViewSet, basename='product-rating')
 
 urlpatterns = [
-    path('products/', views.ProductView.as_view(), name="products-list"),
-    path('product/<str:pk>/', views.ProductDetailView.as_view(), name="product-details"),
-    path('product-create/', views.ProductCreateView.as_view(), name="product-create"),
-    path('product-update/<str:pk>/', views.ProductEditView.as_view(), name="product-update"),
-    path('product-delete/<str:pk>/', views.ProductDeleteView.as_view(), name="product-delete"),
+    path('', include(router.urls)),
+    path('products/<int:product_pk>/', include(product_router.urls)),
 ]

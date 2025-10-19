@@ -1,13 +1,10 @@
-from django.urls import path
+from django.urls import path, include
+from rest_framework.routers import DefaultRouter
 from payments import views
 
+router = DefaultRouter()
+router.register(r"payments", views.PaymentViewSet, basename="payment")
 
 urlpatterns = [
-    path('test-payment/', views.TestStripeImplementation.as_view()),
-    path('create-card/', views.CreateCardTokenView.as_view()),
-    path('charge-customer/', views.ChargeCustomerView.as_view()),
-    path('update-card/', views.CardUpdateView.as_view()),    
-    path('delete-card/', views.DeleteCardView.as_view()),    
-    path('card-details/', views.RetrieveCardView.as_view()),
-    path('check-token/', views.CheckTokenValidation.as_view()),
+    path("", include(router.urls)),
 ]
