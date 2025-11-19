@@ -15,6 +15,7 @@ class NotificationViewSet(viewsets.ModelViewSet):
 
     def list(self, request):
         unread_only = request.query_params.get("unread_only", False)
+        # hehe this is duy
         queryset = NotificationService.get_user_notifications(
             request.user, unread_only=unread_only
         )
