@@ -64,3 +64,19 @@ class MyTokenObtainPairSerializer(TokenObtainPairSerializer):
             data[k] = v
         
         return data
+
+class MyTokenObtainPairView(TokenObtainPairView):
+    serializer_class = MyTokenObtainPairSerializer
+
+
+# list all the cards (of currently logged in user only)
+class CardsListView(APIView):
+
+    permission_classes = [permissions.IsAuthenticated]
+
+    def get(self, request):
+        # show stripe cards of only that user which is equivalent 
+        #to currently logged in user
+        stripeCards = StripeModel.objects.filter(user=request.user)
+        serializer = CardsListSerializer(stripeCards, many=True)
+        return Response(serializer.data, status=status.HTTP_200_OK)
